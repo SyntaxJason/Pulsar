@@ -1,5 +1,20 @@
 # Pulsar
 
+## Maven
+
+```xml
+<repository>
+    <id>SyntaxJason-Beta</id>
+    <url>https://www.syntaxjason.de/maven/beta</url>
+</repository>
+
+<dependency>
+    <groupId>de.syntaxjason</groupId>
+    <artifactId>pulsar</artifactId>
+    <version>0.1.0-Beta</version>
+</dependency>
+```
+
 Pulsar is a small, intuitive Java networking library powered by Netty.
 
 The design goal is simple: application code should feel closer to Bukkit events than to a low-level networking framework. Netty stays under the hood; normal users work with records, listeners, connections and network caches.
