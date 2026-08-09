@@ -232,6 +232,19 @@ Next architectural steps:
 
 See [`docs/PROTOCOL.md`](docs/PROTOCOL.md) for the current wire format.
 
+## Examples
+
+A complete server/client example is included in [`examples/`](examples/). It covers:
+
+- packet records
+- Bukkit-style packet and connection listeners
+- `NetworkCache<K, V>` with FOREVER-by-default entries
+- explicit TTL values
+- custom serializers
+- server replies via `Connection#send(...)`
+
+Build Pulsar first with `mvn clean install`, then build the examples from the `examples` directory.
+
 
 ## Threading note
 

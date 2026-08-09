@@ -158,7 +158,7 @@ public final class NetworkCacheImpl<K, V> implements NetworkCache<K, V> {
         }
     }
 
-    List<CacheSnapshotEntry> snapshotEntries() {
+    public List<CacheSnapshotEntry> snapshotEntries() {
         purgeExpiredLocally();
         long now = System.currentTimeMillis();
         return entries.entrySet().stream()
