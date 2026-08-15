@@ -5,7 +5,7 @@
 ```xml
 <repository>
     <id>SyntaxJason-Beta</id>
-    <url>https://www.syntaxjason.de/maven/beta</url>
+    <url>https://repo.syntaxjason.de/beta</url>
 </repository>
 
 <dependency>
