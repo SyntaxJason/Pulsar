@@ -20,6 +20,8 @@ public final class ClientExample {
     public static void main(String[] args) {
         PulsarClient client = Pulsar.client()
                 .address("127.0.0.1", 8080)
+                .packets(ChatPacket.class, LocationPacket.class)
+                .serializable(PlayerData.class)
                 .serializer(Location.class, new LocationSerializer())
                 .listener(new ClientListener())
                 .connect();

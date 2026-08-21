@@ -12,7 +12,7 @@ import java.util.List;
 final class ProtocolWriter {
 
     static final int MAGIC = 0x50554C53;
-    static final int VERSION = 1;
+    static final int VERSION = 2;
     static final int MAX_FRAME_SIZE = 16 * 1024 * 1024;
 
     private ProtocolWriter() {
@@ -21,10 +21,10 @@ final class ProtocolWriter {
     @SuppressWarnings("unchecked")
     static void packet(NettyConnection connection, Packet packet) {
         Class<? extends Packet> type = (Class<? extends Packet>) packet.getClass();
-        String id = connection.endpoint().packetRegistry().id(type);
+        int wireId = connection.endpoint().packetRegistry().wireId(type);
 
         ByteBuf buffer = frame(connection.channel(), FrameType.PACKET);
-        connection.endpoint().binarySerializer().write(buffer, String.class, id);
+        buffer.writeInt(wireId);
         connection.endpoint().binarySerializer().write(buffer, type, packet);
         connection.channel().writeAndFlush(buffer);
     }

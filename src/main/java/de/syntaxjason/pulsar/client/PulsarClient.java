@@ -1,5 +1,7 @@
 package de.syntaxjason.pulsar.client;
 
+import de.syntaxjason.pulsar.bootstrap.BootstrapReport;
+import de.syntaxjason.pulsar.bootstrap.RuntimeState;
 import de.syntaxjason.pulsar.cache.NetworkCache;
 import de.syntaxjason.pulsar.connection.Connection;
 import de.syntaxjason.pulsar.event.EventBus;
@@ -14,6 +16,8 @@ import de.syntaxjason.pulsar.internal.netty.ProtocolException;
 import de.syntaxjason.pulsar.internal.netty.PulsarChannelInitializer;
 import de.syntaxjason.pulsar.internal.serialization.BinarySerializer;
 import de.syntaxjason.pulsar.packet.Packet;
+import de.syntaxjason.pulsar.logging.LogCategory;
+import de.syntaxjason.pulsar.logging.PulsarLogger;
 import de.syntaxjason.pulsar.packet.PacketRegistry;
 import de.syntaxjason.pulsar.serialization.SerializerRegistry;
 import io.netty.bootstrap.Bootstrap;
@@ -33,8 +37,11 @@ public final class PulsarClient implements InternalEndpoint, AutoCloseable {
     private final PacketRegistry packets;
     private final SerializerRegistry serializers;
     private final BinarySerializer binarySerializer;
+    private final BootstrapReport bootstrapReport;
+    private final PulsarLogger logger;
     private final CacheManager caches;
 
+    private volatile RuntimeState state = RuntimeState.FROZEN;
     private volatile EventLoopGroup eventLoopGroup;
     private volatile NettyConnection connection;
 
@@ -43,14 +50,19 @@ public final class PulsarClient implements InternalEndpoint, AutoCloseable {
             int port,
             SimpleEventBus events,
             PacketRegistry packets,
-            SerializerRegistry serializers
+            SerializerRegistry serializers,
+            BinarySerializer binarySerializer,
+            BootstrapReport bootstrapReport,
+            PulsarLogger logger
     ) {
         this.host = host;
         this.port = port;
         this.events = events;
         this.packets = packets;
         this.serializers = serializers;
-        this.binarySerializer = new BinarySerializer(serializers);
+        this.binarySerializer = binarySerializer;
+        this.bootstrapReport = bootstrapReport;
+        this.logger = logger;
         this.caches = new CacheManager(events, false);
 
         caches.mutationSink(this::sendCacheMutation);
@@ -73,6 +85,8 @@ public final class PulsarClient implements InternalEndpoint, AutoCloseable {
                     .option(ChannelOption.SO_KEEPALIVE, true)
                     .connect(new InetSocketAddress(host, port))
                     .syncUninterruptibly();
+            state = RuntimeState.RUNNING;
+            logger.info(LogCategory.NETWORK, "Connected to " + host + ":" + port);
         } catch (RuntimeException exception) {
             close();
             throw exception;
@@ -101,7 +115,17 @@ public final class PulsarClient implements InternalEndpoint, AutoCloseable {
     }
 
     public <K, V> NetworkCache<K, V> cache(String name, Class<K> keyType, Class<V> valueType) {
+        ensureCompiled(keyType);
+        ensureCompiled(valueType);
         return caches.cache(name, keyType, valueType);
+    }
+
+    public BootstrapReport bootstrapReport() {
+        return bootstrapReport;
+    }
+
+    public RuntimeState state() {
+        return state;
     }
 
     public boolean connected() {
@@ -132,6 +156,11 @@ public final class PulsarClient implements InternalEndpoint, AutoCloseable {
     @Override
     public CacheManager cacheManager() {
         return caches;
+    }
+
+    @Override
+    public PulsarLogger logger() {
+        return logger;
     }
 
     @Override
@@ -178,6 +207,18 @@ public final class PulsarClient implements InternalEndpoint, AutoCloseable {
         if (group != null) {
             group.shutdownGracefully().syncUninterruptibly();
         }
+        state = RuntimeState.CLOSED;
+    }
+
+    private void ensureCompiled(Class<?> type) {
+        if (binarySerializer.supports(type)) {
+            return;
+        }
+        throw new IllegalStateException(
+                "Cache type " + type.getName()
+                        + " was not registered during bootstrap. Add .serializable("
+                        + type.getSimpleName() + ".class) before connect()."
+        );
     }
 
     private void sendCacheMutation(CacheMutation mutation) {

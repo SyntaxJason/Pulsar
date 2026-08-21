@@ -6,7 +6,7 @@
 
     <groupId>de.syntaxjason</groupId>
     <artifactId>pulsar</artifactId>
-    <version>0.1.0-SNAPSHOT</version>
+    <version>0.2.0-BETA</version>
     <name>Pulsar</name>
     <description>Intuitive Bukkit-style Java networking library powered by Netty.</description>
 

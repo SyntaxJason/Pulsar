@@ -81,10 +81,13 @@ final class PulsarInboundHandler extends SimpleChannelInboundHandler<ByteBuf> {
 
     @SuppressWarnings({"rawtypes", "unchecked"})
     private void readPacket(ByteBuf buffer) {
-        String id = (String) endpoint.binarySerializer().read(buffer, String.class);
-        Class<? extends Packet> type = endpoint.packetRegistry().type(id);
+        int wireId = buffer.readInt();
+        Class<? extends Packet> type = endpoint.packetRegistry().type(wireId);
         if (type == null) {
-            throw new ProtocolException("Unknown packet type '" + id + "'. Register the packet on both endpoints.");
+            throw new ProtocolException(
+                    "Unknown packet wire id " + Integer.toUnsignedString(wireId)
+                            + ". Register the packet on both endpoints before start/connect."
+            );
         }
 
         Packet packet = (Packet) endpoint.binarySerializer().read(buffer, type);

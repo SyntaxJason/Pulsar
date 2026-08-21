@@ -1,5 +1,7 @@
 package de.syntaxjason.pulsar.server;
 
+import de.syntaxjason.pulsar.bootstrap.BootstrapReport;
+import de.syntaxjason.pulsar.bootstrap.RuntimeState;
 import de.syntaxjason.pulsar.cache.NetworkCache;
 import de.syntaxjason.pulsar.connection.Connection;
 import de.syntaxjason.pulsar.event.EventBus;
@@ -15,6 +17,8 @@ import de.syntaxjason.pulsar.internal.netty.ProtocolException;
 import de.syntaxjason.pulsar.internal.netty.PulsarChannelInitializer;
 import de.syntaxjason.pulsar.internal.serialization.BinarySerializer;
 import de.syntaxjason.pulsar.packet.Packet;
+import de.syntaxjason.pulsar.logging.LogCategory;
+import de.syntaxjason.pulsar.logging.PulsarLogger;
 import de.syntaxjason.pulsar.packet.PacketRegistry;
 import de.syntaxjason.pulsar.serialization.SerializerRegistry;
 import io.netty.bootstrap.ServerBootstrap;
@@ -30,6 +34,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 public final class PulsarServer implements InternalEndpoint, AutoCloseable {
@@ -40,10 +45,13 @@ public final class PulsarServer implements InternalEndpoint, AutoCloseable {
     private final PacketRegistry packets;
     private final SerializerRegistry serializers;
     private final BinarySerializer binarySerializer;
+    private final BootstrapReport bootstrapReport;
+    private final PulsarLogger logger;
     private final CacheManager caches;
-    private final Map<java.util.UUID, NettyConnection> connections = new ConcurrentHashMap<>();
+    private final Map<UUID, NettyConnection> connections = new ConcurrentHashMap<>();
     private final Map<String, Set<NettyConnection>> cacheSubscribers = new ConcurrentHashMap<>();
 
+    private volatile RuntimeState state = RuntimeState.FROZEN;
     private volatile EventLoopGroup bossGroup;
     private volatile EventLoopGroup workerGroup;
     private volatile Channel channel;
@@ -53,14 +61,19 @@ public final class PulsarServer implements InternalEndpoint, AutoCloseable {
             int port,
             SimpleEventBus events,
             PacketRegistry packets,
-            SerializerRegistry serializers
+            SerializerRegistry serializers,
+            BinarySerializer binarySerializer,
+            BootstrapReport bootstrapReport,
+            PulsarLogger logger
     ) {
         this.host = host;
         this.port = port;
         this.events = events;
         this.packets = packets;
         this.serializers = serializers;
-        this.binarySerializer = new BinarySerializer(serializers);
+        this.binarySerializer = binarySerializer;
+        this.bootstrapReport = bootstrapReport;
+        this.logger = logger;
         this.caches = new CacheManager(events, true);
 
         caches.mutationSink(this::broadcastCacheMutation);
@@ -85,6 +98,8 @@ public final class PulsarServer implements InternalEndpoint, AutoCloseable {
                     .bind(new InetSocketAddress(host, port))
                     .syncUninterruptibly()
                     .channel();
+            state = RuntimeState.RUNNING;
+            logger.info(LogCategory.NETWORK, "Server listening on " + host + ":" + port());
         } catch (RuntimeException exception) {
             close();
             throw exception;
@@ -104,7 +119,17 @@ public final class PulsarServer implements InternalEndpoint, AutoCloseable {
     }
 
     public <K, V> NetworkCache<K, V> cache(String name, Class<K> keyType, Class<V> valueType) {
+        ensureCompiled(keyType);
+        ensureCompiled(valueType);
         return caches.cache(name, keyType, valueType);
+    }
+
+    public BootstrapReport bootstrapReport() {
+        return bootstrapReport;
+    }
+
+    public RuntimeState state() {
+        return state;
     }
 
     public Collection<Connection> connections() {
@@ -151,6 +176,11 @@ public final class PulsarServer implements InternalEndpoint, AutoCloseable {
     @Override
     public CacheManager cacheManager() {
         return caches;
+    }
+
+    @Override
+    public PulsarLogger logger() {
+        return logger;
     }
 
     @Override
@@ -207,6 +237,18 @@ public final class PulsarServer implements InternalEndpoint, AutoCloseable {
         if (boss != null) {
             boss.shutdownGracefully().syncUninterruptibly();
         }
+        state = RuntimeState.CLOSED;
+    }
+
+    private void ensureCompiled(Class<?> type) {
+        if (binarySerializer.supports(type)) {
+            return;
+        }
+        throw new IllegalStateException(
+                "Cache type " + type.getName()
+                        + " was not registered during bootstrap. Add .serializable("
+                        + type.getSimpleName() + ".class) before start()."
+        );
     }
 
     private void broadcastCacheMutation(CacheMutation mutation) {

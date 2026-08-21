@@ -1,5 +1,7 @@
 # Pulsar
 
+Pulsar is an intuitive Java networking library powered by Netty. Application code should feel closer to Bukkit events than to a low-level networking framework while the runtime keeps the hot path small and predictable.
+
 ## Maven
 
 ```xml
@@ -11,21 +13,36 @@
 <dependency>
     <groupId>de.syntaxjason</groupId>
     <artifactId>pulsar</artifactId>
-    <version>0.1.0-Beta</version>
+    <version>0.2.0-BETA</version>
 </dependency>
 ```
-
-Pulsar is a small, intuitive Java networking library powered by Netty.
-
-The design goal is simple: application code should feel closer to Bukkit events than to a low-level networking framework. Netty stays under the hood; normal users work with records, listeners, connections and network caches.
 
 ## Requirements
 
 - Java 21+
 - Maven
-- Netty 4.2.x (managed by Pulsar's Maven configuration)
+- Netty 4.2.x
 
-## Packet in one record
+## 0.2.0-BETA: bootstrap first, reflection-free runtime
+
+Pulsar 0.2.0-BETA introduces a strict bootstrap/freeze model.
+
+Before the network starts, Pulsar:
+
+1. registers packets, serializers and listeners,
+2. inspects reflective metadata once,
+3. compiles record codec plans and event invokers,
+4. validates every registered packet type,
+5. freezes the registries,
+6. starts the Netty runtime.
+
+After the freeze, packet serialization and event dispatch do not call `Method.invoke()`, `Constructor.newInstance()`, `Class.forName()` or scan record components. Record accessors and constructors are prepared as `MethodHandle` call sites during bootstrap.
+
+Runtime registration that would require a new reflective scan is intentionally rejected. Register everything on the builder before `start()` / `connect()`.
+
+## Packets
+
+A packet is still just a record:
 
 ```java
 import de.syntaxjason.pulsar.packet.Packet;
@@ -37,18 +54,36 @@ public record ChatPacket(
 }
 ```
 
-No encoder, decoder or numeric packet id is required.
+Register packets before the endpoint starts:
 
-For normal class-name based packets, Pulsar automatically resolves and registers the packet type on receive. If a stable wire id is desired, use `@PacketType("chat")` and register that packet on both endpoints for now. A compile-time packet index is planned.
+```java
+PulsarServer server = Pulsar.server()
+        .port(8080)
+        .packets(ChatPacket.class, LocationPacket.class)
+        .start();
+```
+
+A typed `PacketReceiveEvent<T>` listener also causes `T` to be registered automatically during bootstrap. Explicit `.packet(...)` / `.packets(...)` is still recommended for packets that are only sent and never received by a typed listener.
+
+### Stable packet names
+
+By default, the logical packet id is the class name. `@PacketType` can provide a stable logical name:
+
+```java
+@PacketType("chat")
+public record ChatPacket(String sender, String message) implements Packet {
+}
+```
+
+Protocol v2 does **not** put class names on the wire. Pulsar derives a deterministic 32-bit wire id from the logical packet id and validates collisions during bootstrap. Incoming network data can no longer trigger `Class.forName()`.
 
 ## Server
 
 ```java
-import de.syntaxjason.pulsar.Pulsar;
-import de.syntaxjason.pulsar.server.PulsarServer;
-
 PulsarServer server = Pulsar.server()
         .port(8080)
+        .packets(ChatPacket.class)
+        .listener(new ChatListener())
         .start();
 ```
 
@@ -61,23 +96,20 @@ server.broadcast(new ChatPacket("Server", "Hello network!"));
 ## Client
 
 ```java
-import de.syntaxjason.pulsar.Pulsar;
-import de.syntaxjason.pulsar.client.PulsarClient;
-
 PulsarClient client = Pulsar.client()
         .address("127.0.0.1", 8080)
+        .packets(ChatPacket.class)
+        .listener(new ChatListener())
         .connect();
 
 client.send(new ChatPacket("Jason", "Moin"));
 ```
 
-## Bukkit-style events
+`startAsync()` and `connectAsync()` execute the blocking bootstrap/start boundary on Java virtual threads instead of the common `ForkJoinPool`.
+
+## Bukkit-style events without reflective dispatch
 
 ```java
-import de.syntaxjason.pulsar.event.EventHandler;
-import de.syntaxjason.pulsar.event.Listener;
-import de.syntaxjason.pulsar.event.packet.PacketReceiveEvent;
-
 public final class ChatListener implements Listener {
 
     @EventHandler
@@ -88,79 +120,25 @@ public final class ChatListener implements Listener {
 }
 ```
 
-Register it:
+Register listeners on the builder:
 
 ```java
-server.events().register(new ChatListener());
+PulsarServer server = Pulsar.server()
+        .listener(new ChatListener())
+        .start();
 ```
 
-Connection lifecycle uses the same event system:
+Pulsar scans `@EventHandler` methods once during bootstrap and turns them into prepared `MethodHandle` invokers. `fire()` only executes those invokers; it does not call `Method.invoke()`.
+
+Because the event registry is frozen after startup, this is intentionally rejected:
 
 ```java
-@EventHandler
-public void onConnect(ConnectionOpenEvent event) {
-    System.out.println(event.connection().remoteAddress());
-}
-```
-
-## Network cache
-
-The default is **FOREVER**. A value has no expiry unless a TTL is explicitly supplied.
-
-```java
-public record PlayerData(
-        UUID uuid,
-        String name,
-        long coins
-) {
-}
-```
-
-Create the same named cache on server and clients:
-
-```java
-NetworkCache<UUID, PlayerData> players = server.cache(
-        "players",
-        UUID.class,
-        PlayerData.class
-);
-```
-
-Normal map-like use:
-
-```java
-players.put(uuid, data);       // infinite until replaced/removed
-PlayerData data = players.get(uuid);
-players.remove(uuid);
-players.clear();
-```
-
-Optional TTL:
-
-```java
-players.put(uuid, data, Duration.ofMinutes(10));
-```
-
-The current cache model is server-authoritative. Client-side mutations while disconnected are rejected instead of being silently lost on the next synchronization.
-
-1. a client subscribes to a named cache,
-2. the server sends an initial snapshot,
-3. writes are applied by the server,
-4. the authoritative mutation is broadcast to every subscribed client, including the origin,
-5. TTL expiry is decided by the server and propagated as a removal.
-
-Cache events also use the Pulsar event bus:
-
-```java
-@EventHandler
-public void onCachePut(CachePutEvent<UUID, PlayerData> event) {
-    System.out.println(event.cache() + " -> " + event.key());
-}
+server.events().register(new ChatListener()); // registry is already frozen
 ```
 
 ## Automatic serialization
 
-The initial binary serializer supports:
+The bootstrap compiler supports:
 
 - primitives and boxed primitives
 - `String`
@@ -173,94 +151,153 @@ The initial binary serializer supports:
 - `Map<K, V>`
 - `Optional<T>`
 - nested Java records
-- custom serializers
+- custom `TypeSerializer<T>` implementations
 
-Custom types do not expose Netty's `ByteBuf`:
+Records are analyzed recursively before networking starts. Accessors and canonical constructors are converted to runtime codec plans.
+
+### Non-packet record models
+
+Types that are not reachable from registered packets must be declared explicitly before startup. This is especially important for network-cache values:
 
 ```java
-public final class LocationSerializer implements TypeSerializer<Location> {
+PulsarServer server = Pulsar.server()
+        .serializable(PlayerData.class)
+        .start();
 
-    @Override
-    public void write(SerializationWriter out, Location value) {
-        out.writeString(value.world());
-        out.writeDouble(value.x());
-        out.writeDouble(value.y());
-        out.writeDouble(value.z());
-    }
-
-    @Override
-    public Location read(SerializationReader in) {
-        return new Location(
-                in.readString(),
-                in.readDouble(),
-                in.readDouble(),
-                in.readDouble()
-        );
-    }
-}
+NetworkCache<UUID, PlayerData> players = server.cache(
+        "players",
+        UUID.class,
+        PlayerData.class
+);
 ```
 
-Register it when building an endpoint:
+If a cache type was not compiled during bootstrap, Pulsar fails immediately with an explanation instead of performing reflection on the network thread.
+
+### Custom serializers
+
+Custom serializers still do not expose Netty's `ByteBuf`:
+
+```java
+PulsarServer server = Pulsar.server()
+        .serializer(Location.class, new LocationSerializer())
+        .start();
+```
+
+A registered custom serializer is compiled into the runtime serialization table during bootstrap.
+
+## Network cache
+
+The default cache lifetime is **FOREVER**. A value has no expiry unless a TTL is explicitly supplied.
+
+```java
+NetworkCache<UUID, PlayerData> players = server.cache(
+        "players",
+        UUID.class,
+        PlayerData.class
+);
+
+players.put(uuid, data);
+players.put(uuid, data, Duration.ofMinutes(10));
+players.remove(uuid);
+players.clear();
+```
+
+The current cache model remains server-authoritative:
+
+1. a client subscribes to a named cache,
+2. the server sends an initial snapshot,
+3. writes are applied by the server,
+4. the authoritative mutation is broadcast to subscribed clients,
+5. server-side TTL expiry is propagated as a removal.
+
+## Logging
+
+Pulsar ships with a small logger abstraction and does not require SLF4J, Log4j or JUL.
+
+Default console logging:
 
 ```java
 Pulsar.server()
-        .serializer(Location.class, new LocationSerializer())
         .port(8080)
         .start();
 ```
 
-## Current v0.1 foundation
+Enable detailed bootstrap registration logs:
 
-Already implemented:
+```java
+Pulsar.server()
+        .logLevel(LogLevel.DEBUG)
+        .start();
+```
 
-- Netty TCP server/client
-- 4-byte length-prefixed frames
-- protocol magic + protocol version
-- packet send/receive
-- automatic record serialization/deserialization
-- packet type auto-resolution
-- `@PacketType` aliases
-- Bukkit-style listener/event dispatch with priorities and cancellable events
-- connection open/close events
-- replicated `NetworkCache<K, V>`
-- forever-by-default cache values
-- optional cache TTL
-- initial cache snapshots
-- cache put/remove/clear/expire/sync events
-- custom serializers without leaking `ByteBuf`
-- frame and collection size validation
+Disable all Pulsar logging:
 
-Next architectural steps:
+```java
+Pulsar.server()
+        .logging(false)
+        .start();
+```
 
-- request/response API
-- heartbeats and connection health
-- automatic reconnect
-- TLS
-- authentication/handshake metadata
-- native transport auto-selection (`io_uring` / epoll / kqueue / NIO)
-- compile-time packet index for stable packet aliases without manual registration
-- cache revisions/delta resync
-- atomic cache operations / single-flight loaders
-- `NetworkValue<T>` and `NetworkSet<T>`
-- backpressure / write watermarks
-- protocol compatibility negotiation
+Provide your own logger:
 
-See [`docs/PROTOCOL.md`](docs/PROTOCOL.md) for the current wire format.
+```java
+Pulsar.server()
+        .logger(new MyPulsarLogger())
+        .start();
+```
 
-## Examples
+Implement:
 
-A complete server/client example is included in [`examples/`](examples/). It covers:
+```java
+public final class MyPulsarLogger implements PulsarLogger {
 
-- packet records
-- Bukkit-style packet and connection listeners
-- `NetworkCache<K, V>` with FOREVER-by-default entries
-- explicit TTL values
-- custom serializers
-- server replies via `Connection#send(...)`
+    @Override
+    public boolean enabled(LogLevel level, LogCategory category) {
+        return true;
+    }
 
-Build Pulsar first with `mvn clean install`, then build the examples from the `examples` directory.
+    @Override
+    public void log(
+            LogLevel level,
+            LogCategory category,
+            String message,
+            Throwable throwable
+    ) {
+        // Bridge to Bukkit, Velocity, SLF4J, Log4j, your cloud console, ...
+    }
+}
+```
 
+Available categories currently include bootstrap, registry, serialization, events, network, connections, packets, cache and performance.
 
-## Threading note
+## Bootstrap diagnostics
 
-Network-originated listeners currently execute on Netty I/O threads. Local cache mutations execute on the caller thread and TTL expiry events execute on Pulsar's cache-expiry thread. Do not block a Netty event handler with database or filesystem work. A configurable event executor is planned before the stable API.
+Every started endpoint exposes its immutable bootstrap report:
+
+```java
+BootstrapReport report = server.bootstrapReport();
+
+System.out.println(report.packets());
+System.out.println(report.eventHandlers());
+System.out.println(report.serializableTypes());
+System.out.println(report.totalMillis());
+```
+
+Typical DEBUG output:
+
+```text
+INFO  [Pulsar/BOOTSTRAP] Bootstrapping Pulsar 0.2.0-BETA
+DEBUG [Pulsar/EVENT] Compiled event handler ...
+DEBUG [Pulsar/REGISTRY] Registered packet ...
+DEBUG [Pulsar/SERIALIZATION] Compiled codec plan for ...
+DEBUG [Pulsar/REGISTRY] Packet registry frozen ...
+INFO  [Pulsar/BOOTSTRAP] Ready: ... runtime reflection disabled
+```
+
+## Lifecycle
+
+Endpoints expose a `RuntimeState` and transition through the bootstrap/freeze/runtime lifecycle. The externally visible runtime normally starts in `FROZEN`, switches to `RUNNING` after Netty is connected/bound, and becomes `CLOSED` when the endpoint is closed.
+
+## 0.2.0-BETA wire compatibility
+
+0.2.0-BETA uses Pulsar protocol version **2** and numeric packet wire ids. It is intentionally not wire-compatible with the previous 0.1.x class-name packet format. Both sides of a connection must use 0.2.0-BETA or another protocol-v2-compatible build.

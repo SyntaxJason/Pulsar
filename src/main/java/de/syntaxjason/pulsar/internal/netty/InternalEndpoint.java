@@ -4,6 +4,8 @@ import de.syntaxjason.pulsar.event.EventBus;
 import de.syntaxjason.pulsar.internal.cache.CacheManager;
 import de.syntaxjason.pulsar.internal.cache.CacheMutation;
 import de.syntaxjason.pulsar.internal.serialization.BinarySerializer;
+import de.syntaxjason.pulsar.logging.LogCategory;
+import de.syntaxjason.pulsar.logging.PulsarLogger;
 import de.syntaxjason.pulsar.packet.PacketRegistry;
 
 public interface InternalEndpoint {
@@ -18,6 +20,8 @@ public interface InternalEndpoint {
 
     CacheManager cacheManager();
 
+    PulsarLogger logger();
+
     void connected(NettyConnection connection);
 
     void disconnected(NettyConnection connection);
@@ -27,7 +31,10 @@ public interface InternalEndpoint {
     void cacheMutation(NettyConnection connection, CacheMutation mutation);
 
     default void exception(NettyConnection connection, Throwable throwable) {
-        System.getLogger("Pulsar").log(System.Logger.Level.ERROR,
-                "Connection error from " + connection.remoteAddress(), throwable);
+        logger().error(
+                LogCategory.CONNECTION,
+                "Connection error from " + connection.remoteAddress(),
+                throwable
+        );
     }
 }

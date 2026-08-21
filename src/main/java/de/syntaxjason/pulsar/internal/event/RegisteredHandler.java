@@ -6,15 +6,14 @@ import de.syntaxjason.pulsar.event.Listener;
 import de.syntaxjason.pulsar.event.packet.PacketReceiveEvent;
 import de.syntaxjason.pulsar.packet.Packet;
 
-import java.lang.reflect.Method;
-
 record RegisteredHandler(
         Listener listener,
-        Method method,
+        EventInvoker invoker,
         Class<? extends Event> eventType,
         Class<? extends Packet> packetFilter,
         EventPriority priority,
-        boolean ignoreCancelled
+        boolean ignoreCancelled,
+        String source
 ) {
 
     boolean acceptsPacket(Event event) {
