@@ -12,6 +12,7 @@ import de.syntaxjason.pulsar.internal.cache.CacheMutation;
 import de.syntaxjason.pulsar.internal.cache.NetworkCacheImpl;
 import de.syntaxjason.pulsar.internal.event.SimpleEventBus;
 import de.syntaxjason.pulsar.internal.netty.InternalEndpoint;
+import de.syntaxjason.pulsar.internal.netty.EndpointShutdown;
 import de.syntaxjason.pulsar.internal.netty.NettyConnection;
 import de.syntaxjason.pulsar.internal.netty.ProtocolException;
 import de.syntaxjason.pulsar.internal.netty.PulsarChannelInitializer;
@@ -30,6 +31,7 @@ import io.netty.channel.nio.NioIoHandler;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 
 import java.net.InetSocketAddress;
+import java.util.concurrent.CompletableFuture;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -50,6 +52,8 @@ public final class PulsarServer implements InternalEndpoint, AutoCloseable {
     private final CacheManager caches;
     private final Map<UUID, NettyConnection> connections = new ConcurrentHashMap<>();
     private final Map<String, Set<NettyConnection>> cacheSubscribers = new ConcurrentHashMap<>();
+
+    private CompletableFuture<Void> closeFuture;
 
     private volatile RuntimeState state = RuntimeState.FROZEN;
     private volatile EventLoopGroup bossGroup;
@@ -98,7 +102,9 @@ public final class PulsarServer implements InternalEndpoint, AutoCloseable {
                     .bind(new InetSocketAddress(host, port))
                     .syncUninterruptibly()
                     .channel();
-            state = RuntimeState.RUNNING;
+            synchronized (this) {
+                if (state != RuntimeState.CLOSED) state = RuntimeState.RUNNING;
+            }
             logger.info(LogCategory.NETWORK, "Server listening on " + host + ":" + port());
         } catch (RuntimeException exception) {
             close();
@@ -137,7 +143,7 @@ public final class PulsarServer implements InternalEndpoint, AutoCloseable {
     }
 
     public void broadcast(Packet packet) {
-        connections.values().forEach(connection -> connection.send(packet));
+        NettyConnection.broadcast(connections.values(), packet);
     }
 
     public boolean running() {
@@ -184,7 +190,11 @@ public final class PulsarServer implements InternalEndpoint, AutoCloseable {
     }
 
     @Override
-    public void connected(NettyConnection connection) {
+    public synchronized void connected(NettyConnection connection) {
+        if (state == RuntimeState.CLOSED) {
+            connection.close();
+            return;
+        }
         connections.put(connection.id(), connection);
         events.fire(new ConnectionOpenEvent(connection));
     }
@@ -213,31 +223,40 @@ public final class PulsarServer implements InternalEndpoint, AutoCloseable {
         broadcastCacheMutation(mutation);
     }
 
-    @Override
-    public void close() {
+    /**
+     * Starts shutdown and completes after the acceptor and worker event loops terminate.
+     * Safe in event callbacks; repeated calls observe the same shutdown operation.
+     */
+    public synchronized CompletableFuture<Void> closeAsync() {
+        if (closeFuture != null) return closeFuture.copy();
+        closeFuture = new CompletableFuture<>();
+        state = RuntimeState.CLOSED;
+
         Channel current = channel;
         channel = null;
-        if (current != null) {
-            current.close().syncUninterruptibly();
-        }
-
+        if (current != null) current.close();
         connections.values().forEach(NettyConnection::close);
         connections.clear();
         cacheSubscribers.clear();
         caches.close();
 
-        EventLoopGroup workers = workerGroup;
-        workerGroup = null;
-        if (workers != null) {
-            workers.shutdownGracefully().syncUninterruptibly();
-        }
+        CompletableFuture.allOf(
+                EndpointShutdown.shutdown(workerGroup),
+                EndpointShutdown.shutdown(bossGroup)
+        ).whenComplete((ignored, failure) -> {
+            if (failure == null) closeFuture.complete(null);
+            else closeFuture.completeExceptionally(failure);
+        });
+        return closeFuture.copy();
+    }
 
-        EventLoopGroup boss = bossGroup;
-        bossGroup = null;
-        if (boss != null) {
-            boss.shutdownGracefully().syncUninterruptibly();
-        }
-        state = RuntimeState.CLOSED;
+    /** Blocks for termination unless called from one of this server's event loops. */
+    @Override
+    public void close() {
+        boolean onEventLoop = EndpointShutdown.inEventLoop(workerGroup)
+                || EndpointShutdown.inEventLoop(bossGroup);
+        CompletableFuture<Void> shutdown = closeAsync();
+        if (!onEventLoop) shutdown.join();
     }
 
     private void ensureCompiled(Class<?> type) {

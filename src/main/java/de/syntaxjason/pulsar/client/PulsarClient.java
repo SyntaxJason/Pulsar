@@ -11,6 +11,7 @@ import de.syntaxjason.pulsar.internal.cache.CacheManager;
 import de.syntaxjason.pulsar.internal.cache.CacheMutation;
 import de.syntaxjason.pulsar.internal.event.SimpleEventBus;
 import de.syntaxjason.pulsar.internal.netty.InternalEndpoint;
+import de.syntaxjason.pulsar.internal.netty.EndpointShutdown;
 import de.syntaxjason.pulsar.internal.netty.NettyConnection;
 import de.syntaxjason.pulsar.internal.netty.ProtocolException;
 import de.syntaxjason.pulsar.internal.netty.PulsarChannelInitializer;
@@ -22,12 +23,14 @@ import de.syntaxjason.pulsar.packet.PacketRegistry;
 import de.syntaxjason.pulsar.serialization.SerializerRegistry;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.ChannelOption;
+import io.netty.channel.Channel;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.MultiThreadIoEventLoopGroup;
 import io.netty.channel.nio.NioIoHandler;
 import io.netty.channel.socket.nio.NioSocketChannel;
 
 import java.net.InetSocketAddress;
+import java.util.concurrent.CompletableFuture;
 
 public final class PulsarClient implements InternalEndpoint, AutoCloseable {
 
@@ -40,6 +43,8 @@ public final class PulsarClient implements InternalEndpoint, AutoCloseable {
     private final BootstrapReport bootstrapReport;
     private final PulsarLogger logger;
     private final CacheManager caches;
+
+    private CompletableFuture<Void> closeFuture;
 
     private volatile RuntimeState state = RuntimeState.FROZEN;
     private volatile EventLoopGroup eventLoopGroup;
@@ -77,15 +82,24 @@ public final class PulsarClient implements InternalEndpoint, AutoCloseable {
         eventLoopGroup = new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory());
 
         try {
-            new Bootstrap()
+            Channel connectedChannel = new Bootstrap()
                     .group(eventLoopGroup)
                     .channel(NioSocketChannel.class)
                     .handler(new PulsarChannelInitializer(this))
                     .option(ChannelOption.TCP_NODELAY, true)
                     .option(ChannelOption.SO_KEEPALIVE, true)
                     .connect(new InetSocketAddress(host, port))
-                    .syncUninterruptibly();
-            state = RuntimeState.RUNNING;
+                    .syncUninterruptibly()
+                    .channel();
+            // Netty completes the connect promise before firing channelActive. A barrier
+            // ensures the connection and open-event callbacks are ready before returning.
+            connectedChannel.eventLoop().submit(() -> { }).syncUninterruptibly();
+            if (state != RuntimeState.CLOSED && !connected()) {
+                throw new IllegalStateException("Connection closed during initialization");
+            }
+            synchronized (this) {
+                if (state != RuntimeState.CLOSED) state = RuntimeState.RUNNING;
+            }
             logger.info(LogCategory.NETWORK, "Connected to " + host + ":" + port);
         } catch (RuntimeException exception) {
             close();
@@ -112,6 +126,11 @@ public final class PulsarClient implements InternalEndpoint, AutoCloseable {
     public void send(Packet packet) {
         NettyConnection current = requireConnection();
         current.send(packet);
+    }
+
+    /** Sends an ordered batch with one flush after all packets have been encoded. */
+    public void sendAll(Iterable<? extends Packet> packets) {
+        requireConnection().sendAll(packets);
     }
 
     public <K, V> NetworkCache<K, V> cache(String name, Class<K> keyType, Class<V> valueType) {
@@ -164,7 +183,11 @@ public final class PulsarClient implements InternalEndpoint, AutoCloseable {
     }
 
     @Override
-    public void connected(NettyConnection connection) {
+    public synchronized void connected(NettyConnection connection) {
+        if (state == RuntimeState.CLOSED) {
+            connection.close();
+            return;
+        }
         this.connection = connection;
         caches.connected();
         events.fire(new ConnectionOpenEvent(connection));
@@ -191,23 +214,34 @@ public final class PulsarClient implements InternalEndpoint, AutoCloseable {
         }
     }
 
-    @Override
-    public void close() {
+    /**
+     * Starts shutdown and completes after all event loops terminate. Safe in event callbacks.
+     * Repeated calls observe the same shutdown operation.
+     */
+    public synchronized CompletableFuture<Void> closeAsync() {
+        if (closeFuture != null) return closeFuture.copy();
+        closeFuture = new CompletableFuture<>();
+        state = RuntimeState.CLOSED;
+
         NettyConnection current = connection;
         connection = null;
-        if (current != null) {
-            current.close();
-        }
-
+        if (current != null) current.close();
         caches.disconnected();
         caches.close();
 
-        EventLoopGroup group = eventLoopGroup;
-        eventLoopGroup = null;
-        if (group != null) {
-            group.shutdownGracefully().syncUninterruptibly();
-        }
-        state = RuntimeState.CLOSED;
+        EndpointShutdown.shutdown(eventLoopGroup).whenComplete((ignored, failure) -> {
+            if (failure == null) closeFuture.complete(null);
+            else closeFuture.completeExceptionally(failure);
+        });
+        return closeFuture.copy();
+    }
+
+    /** Blocks for termination unless called from this client's event loop. */
+    @Override
+    public void close() {
+        boolean onEventLoop = EndpointShutdown.inEventLoop(eventLoopGroup);
+        CompletableFuture<Void> shutdown = closeAsync();
+        if (!onEventLoop) shutdown.join();
     }
 
     private void ensureCompiled(Class<?> type) {
