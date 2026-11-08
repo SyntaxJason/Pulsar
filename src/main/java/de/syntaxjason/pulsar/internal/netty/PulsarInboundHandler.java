@@ -42,9 +42,6 @@ final class PulsarInboundHandler extends SimpleChannelInboundHandler<ByteBuf> {
             case CACHE_CLEAR -> readCacheClear(buffer);
         }
 
-        if (buffer.isReadable()) {
-            throw new ProtocolException("Trailing bytes after " + type + " frame: " + buffer.readableBytes());
-        }
     }
 
     @Override
@@ -58,9 +55,14 @@ final class PulsarInboundHandler extends SimpleChannelInboundHandler<ByteBuf> {
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
         if (connection != null) {
-            endpoint.exception(connection, cause);
+            try {
+                endpoint.exception(connection, cause);
+            } finally {
+                ctx.close();
+            }
+        } else {
+            ctx.close();
         }
-        ctx.close();
     }
 
     private void validateHeader(ByteBuf buffer) {
@@ -91,6 +93,10 @@ final class PulsarInboundHandler extends SimpleChannelInboundHandler<ByteBuf> {
         }
 
         Packet packet = (Packet) endpoint.binarySerializer().read(buffer, type);
+        if (packet == null) {
+            throw new ProtocolException("Packet must not be null");
+        }
+        requireConsumed(buffer);
         endpoint.eventBus().fire(new PacketReceiveEvent(connection, packet));
     }
 
@@ -99,6 +105,10 @@ final class PulsarInboundHandler extends SimpleChannelInboundHandler<ByteBuf> {
             throw new ProtocolException("Client endpoint received CACHE_SUBSCRIBE frame");
         }
         String cache = (String) endpoint.binarySerializer().read(buffer, String.class);
+        if (cache == null || cache.isBlank() || cache.length() > 128) {
+            throw new ProtocolException("Invalid cache subscription name");
+        }
+        requireConsumed(buffer);
         endpoint.cacheSubscribe(connection, cache);
     }
 
@@ -107,13 +117,10 @@ final class PulsarInboundHandler extends SimpleChannelInboundHandler<ByteBuf> {
             throw new ProtocolException("Server endpoint received CACHE_SNAPSHOT frame");
         }
         String name = (String) endpoint.binarySerializer().read(buffer, String.class);
-        NetworkCacheImpl<?, ?> cache = endpoint.cacheManager().raw(name);
-        if (cache == null) {
-            throw new ProtocolException("Received snapshot for unknown cache '" + name + "'");
-        }
+        NetworkCacheImpl<?, ?> cache = requireCache(name);
 
         int size = buffer.readInt();
-        if (size < 0 || size > 1_000_000) {
+        if (size < 0 || size > 1_000_000 || size > buffer.readableBytes() / Long.BYTES) {
             throw new ProtocolException("Invalid cache snapshot size: " + size);
         }
 
@@ -122,9 +129,11 @@ final class PulsarInboundHandler extends SimpleChannelInboundHandler<ByteBuf> {
             long ttl = buffer.readLong();
             Object key = endpoint.binarySerializer().read(buffer, cache.keyType());
             Object value = endpoint.binarySerializer().read(buffer, cache.valueType());
+            validateEntry(key, value, ttl);
             entries.add(new CacheSnapshotEntry(key, value, ttl));
         }
 
+        requireConsumed(buffer);
         endpoint.cacheManager().applySnapshot(name, entries);
     }
 
@@ -134,6 +143,8 @@ final class PulsarInboundHandler extends SimpleChannelInboundHandler<ByteBuf> {
         NetworkCacheImpl<?, ?> cache = requireCache(name);
         Object key = endpoint.binarySerializer().read(buffer, cache.keyType());
         Object value = endpoint.binarySerializer().read(buffer, cache.valueType());
+        validateEntry(key, value, ttl);
+        requireConsumed(buffer);
         endpoint.cacheMutation(connection, new CacheMutation.Put(name, key, value, ttl));
     }
 
@@ -141,15 +152,39 @@ final class PulsarInboundHandler extends SimpleChannelInboundHandler<ByteBuf> {
         String name = (String) endpoint.binarySerializer().read(buffer, String.class);
         NetworkCacheImpl<?, ?> cache = requireCache(name);
         Object key = endpoint.binarySerializer().read(buffer, cache.keyType());
+        if (key == null) {
+            throw new ProtocolException("Cache key must not be null");
+        }
+        requireConsumed(buffer);
         endpoint.cacheMutation(connection, new CacheMutation.Remove(name, key));
     }
 
     private void readCacheClear(ByteBuf buffer) {
         String name = (String) endpoint.binarySerializer().read(buffer, String.class);
+        requireCache(name);
+        requireConsumed(buffer);
         endpoint.cacheMutation(connection, new CacheMutation.Clear(name));
     }
 
+    private static void requireConsumed(ByteBuf buffer) {
+        if (buffer.isReadable()) {
+            throw new ProtocolException("Trailing bytes after frame: " + buffer.readableBytes());
+        }
+    }
+
+    private static void validateEntry(Object key, Object value, long ttl) {
+        if (key == null || value == null) {
+            throw new ProtocolException("Cache keys and values must not be null");
+        }
+        if (ttl != -1 && ttl <= 0) {
+            throw new ProtocolException("Invalid cache TTL: " + ttl);
+        }
+    }
+
     private NetworkCacheImpl<?, ?> requireCache(String name) {
+        if (name == null) {
+            throw new ProtocolException("Cache name must not be null");
+        }
         NetworkCacheImpl<?, ?> cache = endpoint.cacheManager().raw(name);
         if (cache == null) {
             throw new ProtocolException("Received mutation for unknown cache '" + name + "'");
