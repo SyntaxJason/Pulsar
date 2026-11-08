@@ -6,10 +6,10 @@ import io.netty.buffer.ByteBuf;
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
 
-final class BinarySerializationReader implements SerializationReader {
+import static de.syntaxjason.pulsar.internal.serialization.SerializationLimits.MAX_BYTE_ARRAY;
+import static de.syntaxjason.pulsar.internal.serialization.SerializationLimits.MAX_STRING_BYTES;
 
-    private static final int MAX_STRING_BYTES = 1_048_576;
-    private static final int MAX_BYTE_ARRAY = 16_777_216;
+final class BinarySerializationReader implements SerializationReader {
 
     private final ByteBuf buffer;
 
@@ -65,9 +65,9 @@ final class BinarySerializationReader implements SerializationReader {
         }
         validateLength(length, MAX_STRING_BYTES, "string");
 
-        byte[] bytes = new byte[length];
-        buffer.readBytes(bytes);
-        return new String(bytes, StandardCharsets.UTF_8);
+        String value = buffer.toString(buffer.readerIndex(), length, StandardCharsets.UTF_8);
+        buffer.skipBytes(length);
+        return value;
     }
 
     @Override

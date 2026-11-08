@@ -15,9 +15,11 @@ import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
 import java.util.Collection;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -29,14 +31,7 @@ public final class SimpleEventBus implements EventBus {
     private final List<RegisteredHandler> handlers = new CopyOnWriteArrayList<>();
     private final Set<Listener> listeners = new LinkedHashSet<>();
     private final Set<Class<? extends Packet>> packetTypes = new LinkedHashSet<>();
-    private final ClassValue<RegisteredHandler[]> dispatch = new ClassValue<>() {
-        @Override
-        protected RegisteredHandler[] computeValue(Class<?> type) {
-            return handlers.stream()
-                    .filter(handler -> handler.eventType().isAssignableFrom(type))
-                    .toArray(RegisteredHandler[]::new);
-        }
-    };
+    private volatile ClassValue<RegisteredHandler[]> dispatch = newDispatchCache();
     private final PulsarLogger logger;
     private volatile boolean frozen;
 
@@ -55,7 +50,7 @@ public final class SimpleEventBus implements EventBus {
             throw new IllegalArgumentException("Listener must not be null");
         }
 
-        unregisterInternal(listener);
+        List<RegisteredHandler> compiled = new ArrayList<>();
         MethodHandles.Lookup lookup = MethodHandles.lookup();
 
         for (Method method : listener.getClass().getDeclaredMethods()) {
@@ -64,6 +59,9 @@ public final class SimpleEventBus implements EventBus {
                 continue;
             }
 
+            if (Modifier.isStatic(method.getModifiers())) {
+                throw new IllegalArgumentException("@EventHandler method must not be static: " + method);
+            }
             if (method.getParameterCount() != 1) {
                 throw new IllegalArgumentException("@EventHandler method must have exactly one parameter: " + method);
             }
@@ -81,17 +79,13 @@ public final class SimpleEventBus implements EventBus {
             }
 
             Class<? extends Packet> packetFilter = resolvePacketFilter(method, parameter);
-            if (packetFilter != null) {
-                packetTypes.add(packetFilter);
-            }
-
             try {
                 MethodHandle handle = lookup.unreflect(method)
                         .bindTo(listener)
                         .asType(MethodType.methodType(void.class, Event.class));
                 EventInvoker invoker = handle::invoke;
 
-                handlers.add(new RegisteredHandler(
+                compiled.add(new RegisteredHandler(
                         listener,
                         invoker,
                         parameter.asSubclass(Event.class),
@@ -109,14 +103,19 @@ public final class SimpleEventBus implements EventBus {
                             + "(" + parameter.getSimpleName() + ")");
         }
 
+        unregisterInternal(listener);
+        handlers.addAll(compiled);
         listeners.add(listener);
         handlers.sort(Comparator.comparing(RegisteredHandler::priority));
+        rebuildPacketTypes();
+        dispatch = newDispatchCache();
     }
 
     @Override
     public synchronized void unregister(Listener listener) {
         ensureMutable();
         unregisterInternal(listener);
+        dispatch = newDispatchCache();
     }
 
     @Override
@@ -161,6 +160,17 @@ public final class SimpleEventBus implements EventBus {
 
     public Collection<Class<? extends Packet>> packetTypes() {
         return List.copyOf(packetTypes);
+    }
+
+    private ClassValue<RegisteredHandler[]> newDispatchCache() {
+        return new ClassValue<>() {
+            @Override
+            protected RegisteredHandler[] computeValue(Class<?> type) {
+                return handlers.stream()
+                        .filter(handler -> handler.eventType().isAssignableFrom(type))
+                        .toArray(RegisteredHandler[]::new);
+            }
+        };
     }
 
     private void unregisterInternal(Listener listener) {

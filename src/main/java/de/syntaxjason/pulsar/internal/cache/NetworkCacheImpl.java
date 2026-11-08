@@ -11,6 +11,7 @@ import de.syntaxjason.pulsar.event.cache.CacheRemoveEvent;
 
 import java.time.Duration;
 import java.util.LinkedHashMap;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -95,13 +96,20 @@ public final class NetworkCacheImpl<K, V> implements NetworkCache<K, V> {
         if (ttl == null || ttl.isZero() || ttl.isNegative()) {
             throw new IllegalArgumentException("TTL must be greater than zero");
         }
-        return putInternal(key, value, ttl.toMillis(), CacheOrigin.LOCAL, true);
+        long millis;
+        try {
+            millis = ttl.toMillis();
+        } catch (ArithmeticException failure) {
+            throw new IllegalArgumentException("TTL is too large", failure);
+        }
+        if (millis == 0) throw new IllegalArgumentException("TTL must be at least one millisecond");
+        return putInternal(key, value, millis, CacheOrigin.LOCAL, true);
     }
 
     @Override
     public V remove(K key) {
         manager.ensureWritable();
-        return removeInternal(key, CacheOrigin.LOCAL, true, false);
+        return removeInternal(key, CacheOrigin.LOCAL, true);
     }
 
     @Override
@@ -138,7 +146,7 @@ public final class NetworkCacheImpl<K, V> implements NetworkCache<K, V> {
     }
 
     void applyRemoteRemove(Object key) {
-        removeInternal(keyType.cast(key), CacheOrigin.REMOTE, false, false);
+        removeInternal(keyType.cast(key), CacheOrigin.REMOTE, false);
     }
 
     void applyRemoteClear() {
@@ -146,16 +154,21 @@ public final class NetworkCacheImpl<K, V> implements NetworkCache<K, V> {
     }
 
     void applySnapshot(List<CacheSnapshotEntry> snapshot) {
-        entries.clear();
+        Map<K, CacheEntry<V>> replacement = new HashMap<>();
         long now = System.currentTimeMillis();
 
         for (CacheSnapshotEntry item : snapshot) {
             K key = keyType.cast(item.key());
             V value = valueType.cast(item.value());
+            if (key == null || value == null) {
+                throw new IllegalArgumentException("Cache keys and values must not be null");
+            }
+            long expiresAt = expiryAt(item.ttlMillis(), now);
             long generation = generations.incrementAndGet();
-            long expiresAt = item.ttlMillis() == FOREVER ? 0L : now + item.ttlMillis();
-            entries.put(key, new CacheEntry<>(value, expiresAt, generation));
+            replacement.put(key, new CacheEntry<>(value, expiresAt, generation));
         }
+        entries.clear();
+        entries.putAll(replacement);
     }
 
     public List<CacheSnapshotEntry> snapshotEntries() {
@@ -182,7 +195,7 @@ public final class NetworkCacheImpl<K, V> implements NetworkCache<K, V> {
         }
 
         long generation = generations.incrementAndGet();
-        long expiresAt = ttlMillis == FOREVER ? 0L : System.currentTimeMillis() + ttlMillis;
+        long expiresAt = expiryAt(ttlMillis, System.currentTimeMillis());
         CacheEntry<V> previous = entries.put(key, new CacheEntry<>(value, expiresAt, generation));
 
         if (authoritative && ttlMillis != FOREVER) {
@@ -198,17 +211,13 @@ public final class NetworkCacheImpl<K, V> implements NetworkCache<K, V> {
         return previous == null ? null : previous.value();
     }
 
-    private V removeInternal(K key, CacheOrigin origin, boolean emit, boolean expired) {
+    private V removeInternal(K key, CacheOrigin origin, boolean emit) {
         CacheEntry<V> removed = entries.remove(key);
         if (removed == null) {
             return null;
         }
 
-        if (expired) {
-            events.fire(new CacheExpireEvent<>(name, key, removed.value()));
-        } else {
-            events.fire(new CacheRemoveEvent<>(name, key, removed.value(), origin));
-        }
+        events.fire(new CacheRemoveEvent<>(name, key, removed.value(), origin));
 
         if (emit) {
             manager.emit(new CacheMutation.Remove(name, key));
@@ -270,9 +279,17 @@ public final class NetworkCacheImpl<K, V> implements NetworkCache<K, V> {
             return;
         }
 
-        V removed = removeInternal(key, CacheOrigin.LOCAL, false, true);
-        if (removed != null) {
-            manager.emit(new CacheMutation.Remove(name, key));
+        // A concurrent put may replace the entry after the generation check.
+        if (!entries.remove(key, current)) return;
+        events.fire(new CacheExpireEvent<>(name, key, current.value()));
+        manager.emit(new CacheMutation.Remove(name, key));
+    }
+
+    private static long expiryAt(long ttlMillis, long now) {
+        if (ttlMillis == FOREVER) return 0L;
+        if (ttlMillis <= 0 || ttlMillis > Long.MAX_VALUE - now) {
+            throw new IllegalArgumentException("TTL must be positive and fit into an absolute millisecond timestamp");
         }
+        return now + ttlMillis;
     }
 }

@@ -27,11 +27,11 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
-public final class SerializerCompiler {
+import static de.syntaxjason.pulsar.internal.serialization.SerializationLimits.MAX_BYTE_ARRAY;
+import static de.syntaxjason.pulsar.internal.serialization.SerializationLimits.MAX_COLLECTION_SIZE;
+import static de.syntaxjason.pulsar.internal.serialization.SerializationLimits.MAX_STRING_BYTES;
 
-    private static final int MAX_COLLECTION_SIZE = 1_000_000;
-    private static final int MAX_STRING_BYTES = 1_048_576;
-    private static final int MAX_BYTE_ARRAY = 16_777_216;
+public final class SerializerCompiler {
 
     private final SerializerRegistry registry;
     private final PulsarLogger logger;
@@ -41,6 +41,9 @@ public final class SerializerCompiler {
         this.registry = registry;
         this.logger = logger;
         registerBuiltins();
+        // Remove all overrides first: nested codec plans must also see custom codecs,
+        // regardless of the registry's iteration order.
+        registry.types().forEach(codecs::remove);
         registry.types().forEach(this::compile);
     }
 
@@ -457,9 +460,9 @@ public final class SerializerCompiler {
     private String readString(ByteBuf buffer) {
         int length = buffer.readInt();
         validateLength(buffer, length, MAX_STRING_BYTES, "string");
-        byte[] bytes = new byte[length];
-        buffer.readBytes(bytes);
-        return new String(bytes, StandardCharsets.UTF_8);
+        String value = buffer.toString(buffer.readerIndex(), length, StandardCharsets.UTF_8);
+        buffer.skipBytes(length);
+        return value;
     }
 
     private void writeCollectionSize(ByteBuf buffer, int size) {

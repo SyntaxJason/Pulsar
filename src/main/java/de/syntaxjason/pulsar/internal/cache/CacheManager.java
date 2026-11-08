@@ -27,6 +27,7 @@ public final class CacheManager implements AutoCloseable {
     private volatile Consumer<String> registrationSink = cache -> {
     };
     private volatile boolean connected;
+    private volatile boolean closed;
 
     public CacheManager(EventBus events, boolean server) {
         this.events = events;
@@ -40,6 +41,7 @@ public final class CacheManager implements AutoCloseable {
 
     @SuppressWarnings("unchecked")
     public <K, V> NetworkCache<K, V> cache(String name, Class<K> keyType, Class<V> valueType) {
+        ensureOpen();
         validateName(name);
 
         NetworkCacheImpl<?, ?> existing = caches.get(name);
@@ -98,6 +100,7 @@ public final class CacheManager implements AutoCloseable {
     }
 
     public void ensureWritable() {
+        ensureOpen();
         if (!server && !connected) {
             throw new IllegalStateException("Cannot mutate a network cache while the Pulsar client is disconnected");
         }
@@ -161,7 +164,13 @@ public final class CacheManager implements AutoCloseable {
 
     @Override
     public void close() {
+        closed = true;
+        connected = false;
         scheduler.shutdownNow();
+    }
+
+    private void ensureOpen() {
+        if (closed) throw new IllegalStateException("Pulsar cache manager is closed");
     }
 
     private void validateName(String name) {

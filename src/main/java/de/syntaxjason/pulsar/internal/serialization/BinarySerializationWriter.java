@@ -6,6 +6,9 @@ import io.netty.buffer.ByteBuf;
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
 
+import static de.syntaxjason.pulsar.internal.serialization.SerializationLimits.MAX_BYTE_ARRAY;
+import static de.syntaxjason.pulsar.internal.serialization.SerializationLimits.MAX_STRING_BYTES;
+
 final class BinarySerializationWriter implements SerializationWriter {
 
     private final ByteBuf buffer;
@@ -62,6 +65,9 @@ final class BinarySerializationWriter implements SerializationWriter {
         }
 
         byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+        if (bytes.length > MAX_STRING_BYTES) {
+            throw new SerializationException("String is too large: " + bytes.length + " bytes");
+        }
         buffer.writeInt(bytes.length);
         buffer.writeBytes(bytes);
     }
@@ -85,6 +91,9 @@ final class BinarySerializationWriter implements SerializationWriter {
             return;
         }
 
+        if (value.length > MAX_BYTE_ARRAY) {
+            throw new SerializationException("Byte array is too large: " + value.length);
+        }
         buffer.writeInt(value.length);
         buffer.writeBytes(value);
     }

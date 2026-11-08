@@ -101,9 +101,13 @@ public final class PulsarClient implements InternalEndpoint, AutoCloseable {
                 if (state != RuntimeState.CLOSED) state = RuntimeState.RUNNING;
             }
             logger.info(LogCategory.NETWORK, "Connected to " + host + ":" + port);
-        } catch (RuntimeException exception) {
-            close();
-            throw exception;
+        } catch (Throwable failure) {
+            try {
+                close();
+            } catch (Throwable shutdownFailure) {
+                failure.addSuppressed(shutdownFailure);
+            }
+            throw failure;
         }
     }
 

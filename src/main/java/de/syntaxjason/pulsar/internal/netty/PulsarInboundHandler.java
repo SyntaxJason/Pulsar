@@ -176,7 +176,7 @@ final class PulsarInboundHandler extends SimpleChannelInboundHandler<ByteBuf> {
         if (key == null || value == null) {
             throw new ProtocolException("Cache keys and values must not be null");
         }
-        if (ttl != -1 && ttl <= 0) {
+        if (ttl != -1 && (ttl <= 0 || ttl > Long.MAX_VALUE - System.currentTimeMillis())) {
             throw new ProtocolException("Invalid cache TTL: " + ttl);
         }
     }
