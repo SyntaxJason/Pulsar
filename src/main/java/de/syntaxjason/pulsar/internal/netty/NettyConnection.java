@@ -11,6 +11,7 @@ import java.net.SocketAddress;
 import java.util.UUID;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Objects;
 
@@ -74,16 +75,33 @@ public final class NettyConnection implements Connection {
 
     /** Shares immutable encoded content; each recipient owns an independent reader index. */
     public static void broadcast(Collection<NettyConnection> connections, Packet packet) {
-        List<NettyConnection> recipients = connections.stream().filter(NettyConnection::open).toList();
-        if (recipients.isEmpty()) return;
-        ByteBuf encoded = ProtocolWriter.encodePacket(recipients.getFirst(), packet);
+        Iterator<NettyConnection> recipients = connections.iterator();
+        NettyConnection first = nextOpen(recipients);
+        if (first == null) return;
+        NettyConnection second = nextOpen(recipients);
+        if (second == null) {
+            ProtocolWriter.packet(first, packet);
+            return;
+        }
+        ByteBuf encoded = ProtocolWriter.encodePacket(first, packet);
         try {
-            for (NettyConnection recipient : recipients) {
-                recipient.channel.writeAndFlush(encoded.retainedDuplicate());
+            first.channel.writeAndFlush(encoded.retainedDuplicate());
+            second.channel.writeAndFlush(encoded.retainedDuplicate());
+            NettyConnection next;
+            while ((next = nextOpen(recipients)) != null) {
+                next.channel.writeAndFlush(encoded.retainedDuplicate());
             }
         } finally {
             encoded.release();
         }
+    }
+
+    private static NettyConnection nextOpen(Iterator<NettyConnection> connections) {
+        while (connections.hasNext()) {
+            NettyConnection connection = connections.next();
+            if (connection.open()) return connection;
+        }
+        return null;
     }
 
     private void writeBatch(List<ByteBuf> buffers) {

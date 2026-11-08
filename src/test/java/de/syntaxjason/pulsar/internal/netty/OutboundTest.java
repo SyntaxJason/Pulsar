@@ -107,6 +107,28 @@ class OutboundTest {
     }
 
     @Test
+    void broadcastWithOneOpenRecipientSkipsClosedPeers() {
+        AtomicInteger writes = new AtomicInteger();
+        try (TestEndpoint endpoint = new TestEndpoint(true, serializers(writes), List.of(Message.class))) {
+            EmbeddedChannel open = new EmbeddedChannel();
+            EmbeddedChannel closed = new EmbeddedChannel();
+            try {
+                closed.close();
+                NettyConnection.broadcast(List.of(new NettyConnection(closed, endpoint),
+                        new NettyConnection(open, endpoint)), new Message("single"));
+                assertEquals(1, writes.get());
+                ByteBuf frame = open.readOutbound();
+                try {
+                    frame.skipBytes(10);
+                    assertEquals(new Message("single"), endpoint.binarySerializer().read(frame, Message.class));
+                } finally { frame.release(); }
+                NettyConnection.broadcast(List.of(new NettyConnection(closed, endpoint)), new Message("none"));
+                assertEquals(1, writes.get());
+            } finally { open.finishAndReleaseAll(); closed.finishAndReleaseAll(); }
+        }
+    }
+
+    @Test
     void oversizedOutboundFrameFailsLocallyAndReleasesBuffer() {
         record Payload(byte[] bytes) implements Packet { }
         try (TestEndpoint endpoint = new TestEndpoint(true, new SerializerRegistry(), List.of(Payload.class))) {
