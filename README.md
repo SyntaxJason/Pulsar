@@ -2,6 +2,26 @@
 
 Pulsar is an intuitive Java networking library powered by Netty. Application code should feel closer to Bukkit events than to a low-level networking framework while the runtime keeps the hot path small and predictable.
 
+## Development: 0.3.0-SNAPSHOT
+
+The working tree now targets `0.3.0-SNAPSHOT`. Install it locally with `mvn -Prelease clean install`;
+this snapshot is not published by this repository's build. The Maven coordinates below describe the
+previous published beta. Examples and benchmarks use the locally installed snapshot.
+
+This development version adds:
+
+- `Connection.sendAll(...)` and `PulsarClient.sendAll(...)` for ordered batches with one flush;
+- `PulsarClient.closeAsync()` and `PulsarServer.closeAsync()` for observable asynchronous shutdown;
+- one serialization per server broadcast, shared through independently indexed Netty buffers;
+- frame validation before packet events or cache mutations are applied;
+- consistent outbound size limits and buffer cleanup when serialization fails;
+- cache TTL overflow protection and safe expiry when a value is replaced concurrently;
+- custom serializers for built-in types, and correct listener changes before the event registry freezes;
+- automated regression/TCP tests, a CI matrix, and a standalone JMH benchmark harness.
+
+Netty is pinned to `4.2.18.Final`, a [bug-fix and security release](https://netty.io/news/2026/09/09/4-2-18-Final.html).
+See [release preparation](docs/RELEASE.md) for validation commands and remaining release decisions.
+
 ## Maven
 
 ```xml
@@ -106,6 +126,27 @@ client.send(new ChatPacket("Jason", "Moin"));
 ```
 
 `startAsync()` and `connectAsync()` execute the blocking bootstrap/start boundary on Java virtual threads instead of the common `ForkJoinPool`.
+
+### Sending a batch
+
+```java
+client.sendAll(List.of(
+        new ChatPacket("Jason", "First"),
+        new ChatPacket("Jason", "Second")
+));
+
+// Also available on any Pulsar connection:
+connection.sendAll(packets);
+```
+
+The Netty implementation encodes the entire batch before enqueueing it. If encoding or iteration fails,
+no packet from that batch is sent and all temporary buffers are released. Successful batches retain
+iteration order and use one event-loop task and one flush. Delivery still depends on the connection;
+these void send methods do not acknowledge remote receipt. Keep batches bounded, because all encoded
+frames remain in memory until enqueueing.
+
+`server.broadcast(packet)` serializes once and shares the encoded content among the currently open
+connections. Custom serializers should be deterministic and must not rely on invocation once per recipient.
 
 ## Bukkit-style events without reflective dispatch
 
@@ -297,6 +338,44 @@ INFO  [Pulsar/BOOTSTRAP] Ready: ... runtime reflection disabled
 ## Lifecycle
 
 Endpoints expose a `RuntimeState` and transition through the bootstrap/freeze/runtime lifecycle. The externally visible runtime normally starts in `FROZEN`, switches to `RUNNING` after Netty is connected/bound, and becomes `CLOSED` when the endpoint is closed.
+
+### Closing endpoints
+
+```java
+CompletableFuture<Void> terminated = server.closeAsync();
+terminated.thenRun(() -> System.out.println("Server terminated"));
+```
+
+`closeAsync()` initiates shutdown and completes after Netty's event loops terminate. `state()` becomes
+`CLOSED` when shutdown starts. Calling it repeatedly observes the same shutdown; cancelling a returned
+future does not cancel the underlying cleanup.
+
+`close()` waits for termination when called outside the endpoint's own Netty threads. Inside its own
+event callbacks it initiates shutdown and returns, so it does not wait on the thread executing the
+callback. Do not call `join()` or `get()` on the shutdown future from such a callback.
+
+Event handlers execute synchronously on the calling thread, usually a Netty event loop for received
+packets and a scheduler thread for TTL expiry. Move blocking application work to your own executor.
+
+## Protocol limits and deployment assumptions
+
+A frame may occupy at most 16 MiB including its four-byte length prefix. The payload is therefore
+limited to `16 * 1024 * 1024 - 4` bytes, including the Pulsar header. Oversized outbound frames fail
+locally. Strings are limited to 1 MiB of UTF-8 data, collections to 1,000,000 elements, and byte arrays
+to 16 MiB; the overall frame limit may impose a smaller usable array size.
+
+TTL values must be at least one millisecond and fit in an absolute millisecond timestamp. Omitting a
+TTL still means forever. Malformed frames close the connection before packet events, subscriptions,
+snapshots, or cache mutations are applied. Custom deserializers run during parsing and should avoid
+application side effects.
+
+Pulsar currently uses plaintext TCP and does not authenticate peers or authorize individual cache
+writes. Connected clients can submit changes to known server caches. Deploy within an appropriate
+trusted boundary or an authenticated encrypted transport. Protocol v2 validates the version and packet
+ID, but does not negotiate record schemas or serializer configuration; configure both peers consistently.
+Concurrent cache operations are eventually replicated without sequence numbers or conflict resolution;
+applications needing strict ordering across writer threads must serialize their cache operations.
+Automatic reconnect, bounded outbound queues, TLS configuration and schema negotiation remain future work.
 
 ## 0.2.0-BETA wire compatibility
 

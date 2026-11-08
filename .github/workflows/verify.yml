@@ -1,0 +1,37 @@
+name: Verify
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        java: ['21', '25']
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+          cache: maven
+      - name: Verify and install library with source and Javadoc jars
+        run: mvn --batch-mode --no-transfer-progress -Prelease clean install
+      - name: Compile examples against this build
+        run: mvn --batch-mode --no-transfer-progress -f examples/pom.xml clean verify
+      - name: Compile benchmark harness
+        if: matrix.os == 'ubuntu-latest' && matrix.java == '21'
+        run: mvn --batch-mode --no-transfer-progress -f benchmarks/pom.xml clean package
