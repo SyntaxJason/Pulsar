@@ -2,11 +2,11 @@
 
 Pulsar is an intuitive Java networking library powered by Netty. Application code should feel closer to Bukkit events than to a low-level networking framework while the runtime keeps the hot path small and predictable.
 
-## Development: 0.3.0-SNAPSHOT
+## Development: 0.3.1-SNAPSHOT
 
-The working tree now targets `0.3.0-SNAPSHOT`. Install it locally with `mvn -Prelease clean install`;
-this snapshot is not published by this repository's build. The Maven coordinates below describe the
-previous published beta. Examples and benchmarks use the locally installed snapshot.
+The current development version is `0.3.1-SNAPSHOT`. This snapshot is not published by this
+repository's build. Install it locally using the Maven instructions below; examples and benchmarks
+use the same locally installed version.
 
 This development version adds:
 
@@ -25,16 +25,19 @@ See [release preparation](docs/RELEASE.md) for validation commands and remaining
 
 ## Maven
 
-```xml
-<repository>
-    <id>SyntaxJason-Beta</id>
-    <url>https://repo.syntaxjason.de/beta</url>
-</repository>
+Install the current snapshot from the repository root:
 
+```sh
+mvn -Prelease clean install
+```
+
+Then add it to your project:
+
+```xml
 <dependency>
     <groupId>de.syntaxjason</groupId>
     <artifactId>pulsar</artifactId>
-    <version>0.2.0-BETA</version>
+    <version>0.3.1-SNAPSHOT</version>
 </dependency>
 ```
 
@@ -44,9 +47,9 @@ See [release preparation](docs/RELEASE.md) for validation commands and remaining
 - Maven
 - Netty 4.2.x
 
-## 0.2.0-BETA: bootstrap first, reflection-free runtime
+## Bootstrap first, reflection-free runtime
 
-Pulsar 0.2.0-BETA introduces a strict bootstrap/freeze model.
+Pulsar uses a strict bootstrap/freeze model.
 
 Before the network starts, Pulsar:
 
@@ -369,7 +372,7 @@ System.out.println(report.totalMillis());
 Typical DEBUG output:
 
 ```text
-INFO  [Pulsar/BOOTSTRAP] Bootstrapping Pulsar 0.2.0-BETA
+INFO  [Pulsar/BOOTSTRAP] Bootstrapping Pulsar 0.3.1-SNAPSHOT
 DEBUG [Pulsar/EVENT] Compiled event handler ...
 DEBUG [Pulsar/REGISTRY] Registered packet ...
 DEBUG [Pulsar/SERIALIZATION] Compiled codec plan for ...
@@ -419,6 +422,8 @@ Concurrent cache operations are eventually replicated without sequence numbers o
 applications needing strict ordering across writer threads must serialize their cache operations.
 Automatic reconnect, bounded outbound queues, TLS configuration and schema negotiation remain future work.
 
-## 0.2.0-BETA wire compatibility
+## Wire compatibility
 
-0.2.0-BETA uses Pulsar protocol version **2** and numeric packet wire ids. It is intentionally not wire-compatible with the previous 0.1.x class-name packet format. Both sides of a connection must use 0.2.0-BETA or another protocol-v2-compatible build.
+`0.3.1-SNAPSHOT` uses Pulsar protocol version **2** and numeric packet wire ids. It is incompatible with
+the legacy 0.1.x class-name packet format. Both endpoints must use protocol-v2-compatible builds with
+consistent packet definitions and serializer configuration.

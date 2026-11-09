@@ -1,6 +1,6 @@
 # Release preparation
 
-The development version is **0.3.0-SNAPSHOT**. Protocol version remains **2**.
+The development version is **0.3.1-SNAPSHOT**. Protocol version remains **2**.
 Publishing a Git branch does not deploy Maven artifacts or create a release tag or GitHub release.
 
 ## Build and verify
