@@ -9,13 +9,16 @@ import de.syntaxjason.pulsar.logging.NoOpPulsarLogger;
 import de.syntaxjason.pulsar.logging.PulsarLogger;
 import de.syntaxjason.pulsar.packet.Packet;
 import de.syntaxjason.pulsar.packet.PacketRegistry;
+import de.syntaxjason.pulsar.protocol.ApplicationProtocol;
 import de.syntaxjason.pulsar.serialization.SerializerRegistry;
 import de.syntaxjason.pulsar.serialization.TypeSerializer;
 
 import java.lang.reflect.Type;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
@@ -30,6 +33,41 @@ public final class PulsarServerBuilder {
     private final SerializerRegistry serializers = new SerializerRegistry();
     private final List<Listener> listeners = new ArrayList<>();
     private final Set<Type> serializableTypes = new LinkedHashSet<>();
+    private final List<ApplicationProtocol> applicationProtocols = new ArrayList<>();
+    private int maxProtocolProbeBytes = 64;
+    private long protocolDetectionTimeoutMillis = 5000;
+
+    /** Registers an additional, client-first TCP application protocol on this server's port. */
+    public PulsarServerBuilder protocol(ApplicationProtocol protocol) {
+        Objects.requireNonNull(protocol, "protocol");
+        String name = protocol.name();
+        if (name == null || !name.matches("[a-z][a-z0-9._-]{0,63}") || name.equals("pulsar")) {
+            throw new IllegalArgumentException("Protocol name must match [a-z][a-z0-9._-]{0,63} and not be 'pulsar'");
+        }
+        if (applicationProtocols.stream().anyMatch(existing -> existing.name().equals(name))) {
+            throw new IllegalArgumentException("Duplicate application protocol: " + name);
+        }
+        if (applicationProtocols.size() == 32) throw new IllegalArgumentException("At most 32 additional protocols are supported");
+        applicationProtocols.add(protocol);
+        return this;
+    }
+
+    /** Maximum inspected prefix, independent of the protocol's actual message size limit. */
+    public PulsarServerBuilder maxProtocolProbeBytes(int bytes) {
+        if (bytes < 8 || bytes > 65_536) throw new IllegalArgumentException("Probe limit must be 8..65536 bytes");
+        maxProtocolProbeBytes = bytes;
+        return this;
+    }
+
+    public PulsarServerBuilder protocolDetectionTimeout(Duration timeout) {
+        Objects.requireNonNull(timeout, "timeout");
+        long millis;
+        try { millis = timeout.toMillis(); }
+        catch (ArithmeticException failure) { throw new IllegalArgumentException("Invalid protocol detection timeout", failure); }
+        if (millis < 1 || millis > 60_000) throw new IllegalArgumentException("Detection timeout must be 1..60000 ms");
+        protocolDetectionTimeoutMillis = millis;
+        return this;
+    }
 
     public PulsarServerBuilder host(String host) {
         this.host = host;
@@ -119,6 +157,7 @@ public final class PulsarServerBuilder {
                 bootstrap.report(),
                 logger
         );
+        server.configureProtocols(applicationProtocols, maxProtocolProbeBytes, protocolDetectionTimeoutMillis);
         server.startInternal();
         return server;
     }

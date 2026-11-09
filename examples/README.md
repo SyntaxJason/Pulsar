@@ -37,3 +37,21 @@ A TTL only exists when explicitly supplied:
 ```java
 cache.put(key, value, Duration.ofMinutes(5));
 ```
+
+## Shared-port protocols
+
+`protocol/SharedPortServer.java` runs ordinary Pulsar packets and an HTTP/1.x health endpoint on
+TCP port 8080. Start it from your IDE, then request:
+
+```bash
+curl http://127.0.0.1:8080/health
+```
+
+A normal Pulsar client can use `127.0.0.1:8080` at the same time; it must send a packet or subscribe to
+a cache before the server can select its protocol. The HTTP adapter recognizes standard method
+prefixes, handles GET/HEAD for `/health`, supports keep-alive, returns 404 for other routes and bounds
+aggregated request bodies to 4096 bytes. It is a small adapter example, not a complete web framework.
+
+The examples project declares `netty-codec-http` explicitly. Pulsar core does not bring it into an
+application's runtime dependencies. `mvn -f examples/pom.xml verify` also tests the actual example adapter,
+including a real HTTP request alongside a native Pulsar connection on the same port.

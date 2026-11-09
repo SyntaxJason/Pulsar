@@ -10,6 +10,7 @@ previous published beta. Examples and benchmarks use the locally installed snaps
 
 This development version adds:
 
+- optional application-protocol detection on a shared TCP port, with custom handler pipelines;
 - `Connection.sendAll(...)` and `PulsarClient.sendAll(...)` for ordered batches with one flush;
 - `PulsarClient.closeAsync()` and `PulsarServer.closeAsync()` for observable asynchronous shutdown;
 - one serialization per server broadcast, shared through independently indexed Netty buffers;
@@ -96,6 +97,47 @@ public record ChatPacket(String sender, String message) implements Packet {
 ```
 
 Protocol v2 does **not** put class names on the wire. Pulsar derives a deterministic 32-bit wire id from the logical packet id and validates collisions during bootstrap. Incoming network data can no longer trigger `Class.forName()`.
+
+## Multiple application protocols on one TCP port
+
+Register additional protocols on the server builder:
+
+```java
+PulsarServer server = Pulsar.server()
+        .port(8080)
+        .packets(ChatPacket.class)
+        .protocol(new HttpStatusProtocol()) // adapter from the examples project
+        .protocolDetectionTimeout(Duration.ofSeconds(5))
+        .maxProtocolProbeBytes(64)
+        .start();
+```
+
+This server accepts ordinary Pulsar clients and HTTP requests on the **same TCP port**. The examples
+project includes `HttpStatusProtocol` (`GET` / `HEAD /health`) and a runnable `SharedPortServer`.
+HTTP is an example adapter with its own Netty HTTP dependency; it is not an additional core runtime
+dependency or a built-in HTTP routing framework.
+
+Selection happens once per connection. The selector inspects a bounded prefix, installs the selected
+protocol's pipeline, forwards the original bytes unchanged, and removes itself. Subsequent messages
+on that connection go directly to the protocol's handlers. Pulsar's packet format stays at version 2.
+
+Without `.protocol(...)`, the server installs the existing Pulsar pipeline directly. When multiplexing
+is enabled, clients must send first: the server cannot choose a protocol or emit a Pulsar
+`ConnectionOpenEvent` for a silent client. A normal Pulsar `connect()` still opens the client socket;
+its first `send(...)` or cache subscription lets the server recognize it. Server-first greetings on a
+shared port therefore require a client request first. Selection is not authentication.
+
+Implement `ApplicationProtocol` for other application protocols, or use
+`ApplicationProtocol.withPrefix(name, signature, pipeline -> ...)` for a fixed signature. Custom adapters
+supply their own Netty handlers, framing, size limits and protocol error handling. Protocol names are
+unique, `pulsar` is reserved, and ambiguous signatures are rejected instead of resolving by registration
+order. The default detection deadline is 5 seconds with a 64-byte probe; both are configurable.
+
+`ProtocolSelectedEvent` reports the chosen protocol once. `server.connections()` and broadcasts still
+refer to Pulsar connections; `server.activeConnections()` counts all accepted TCP sockets, including
+custom protocols and pending detection. Closing the server closes all of them.
+
+See [the extension contract and example](docs/PROTOCOLS.md) for lifecycle, framing and limit details.
 
 ## Server
 

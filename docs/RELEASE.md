@@ -30,6 +30,10 @@ release jars, and the benchmark harness. It runs on pushes and pull requests and
 ## Compatibility notes
 
 - Existing `send`, `broadcast`, builder and cache APIs remain available.
+- Additional application protocols can share a server's TCP port. Opting into detection requires
+  clients to send first; the native-only default preserves its existing connection-open behavior.
+  Protocol selection does not modify the v2 packet format or add UDP/version negotiation.
+- HTTP support is demonstrated in the examples module; the core runtime does not gain an HTTP dependency.
 - `Connection.sendAll` has a default implementation for other `Connection` implementations. The
   serialization-before-enqueueing and single-flush behavior belongs to Pulsar's Netty implementation.
 - Ordinary protocol-v2 record serialization retains its wire format.
@@ -68,7 +72,7 @@ release jars, and the benchmark harness. It runs on pushes and pull requests and
 See [the benchmark harness](../benchmarks/README.md). It keeps JMH dependencies out of the library's
 runtime dependency graph. Preserve the raw JSON, JVM version and flags with any published result.
 
-## Local validation on 2026-11-09
+## Earlier hardening validation on 2026-11-09
 
 - Java 21, 25 and 26 on Linux: 60 tests each; zero failures, errors or skips.
 - Java 21/25 release builds and Java 26 release verification: successful, including source/Javadoc jars.
@@ -80,7 +84,7 @@ runtime dependency graph. Preserve the raw JSON, JVM version and flags with any 
 - Javadoc generation reports missing API comment warnings; Windows and remote GitHub Actions remain
   unverified locally. This is release preparation, not a completed stable-release certification.
 
-### Reproduced JDK 26 artifact hashes
+### Historical artifact hashes (before shared-port protocol support)
 
 - `pulsar-0.3.0-SNAPSHOT.jar`: `aa382cb9730210e9ff33900199e858e0c0714d7a486803900a0994239f0a2203`
 - `pulsar-0.3.0-SNAPSHOT-sources.jar`: `c321c1bef75e4594d10f75b8304732656f69b417da18e17a6a56f8e7c1a534d1`

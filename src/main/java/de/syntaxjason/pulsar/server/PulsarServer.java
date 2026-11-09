@@ -11,19 +11,23 @@ import de.syntaxjason.pulsar.internal.cache.CacheManager;
 import de.syntaxjason.pulsar.internal.cache.CacheMutation;
 import de.syntaxjason.pulsar.internal.cache.NetworkCacheImpl;
 import de.syntaxjason.pulsar.internal.event.SimpleEventBus;
-import de.syntaxjason.pulsar.internal.netty.InternalEndpoint;
 import de.syntaxjason.pulsar.internal.netty.EndpointShutdown;
+import de.syntaxjason.pulsar.internal.netty.InternalEndpoint;
 import de.syntaxjason.pulsar.internal.netty.NettyConnection;
 import de.syntaxjason.pulsar.internal.netty.ProtocolException;
 import de.syntaxjason.pulsar.internal.netty.PulsarChannelInitializer;
 import de.syntaxjason.pulsar.internal.serialization.BinarySerializer;
-import de.syntaxjason.pulsar.packet.Packet;
 import de.syntaxjason.pulsar.logging.LogCategory;
 import de.syntaxjason.pulsar.logging.PulsarLogger;
+import de.syntaxjason.pulsar.packet.Packet;
 import de.syntaxjason.pulsar.packet.PacketRegistry;
+import de.syntaxjason.pulsar.protocol.ApplicationProtocol;
 import de.syntaxjason.pulsar.serialization.SerializerRegistry;
+
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.Channel;
+import io.netty.channel.ChannelId;
+import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.MultiThreadIoEventLoopGroup;
@@ -31,12 +35,12 @@ import io.netty.channel.nio.NioIoHandler;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 
 import java.net.InetSocketAddress;
-import java.util.concurrent.CompletableFuture;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 
 public final class PulsarServer implements InternalEndpoint, AutoCloseable {
@@ -52,6 +56,11 @@ public final class PulsarServer implements InternalEndpoint, AutoCloseable {
     private final CacheManager caches;
     private final Map<UUID, NettyConnection> connections = new ConcurrentHashMap<>();
     private final Map<String, Set<NettyConnection>> cacheSubscribers = new ConcurrentHashMap<>();
+
+    private final Map<ChannelId, Channel> sockets = new ConcurrentHashMap<>();
+    private List<ApplicationProtocol> applicationProtocols = List.of();
+    private int maxProtocolProbeBytes = 64;
+    private long protocolDetectionTimeoutMillis = 5000;
 
     private CompletableFuture<Void> closeFuture;
 
@@ -84,6 +93,23 @@ public final class PulsarServer implements InternalEndpoint, AutoCloseable {
         caches.registrationSink(this::syncRegisteredCache);
     }
 
+    void configureProtocols(List<ApplicationProtocol> protocols, int maxProbeBytes, long timeoutMillis) {
+        if (workerGroup != null) throw new IllegalStateException("Server has already started");
+        applicationProtocols = List.copyOf(protocols);
+        maxProtocolProbeBytes = maxProbeBytes;
+        protocolDetectionTimeoutMillis = timeoutMillis;
+    }
+
+    private synchronized boolean track(Channel accepted) {
+        if (state == RuntimeState.CLOSED) {
+            accepted.close();
+            return false;
+        }
+        sockets.put(accepted.id(), accepted);
+        accepted.closeFuture().addListener(ignored -> sockets.remove(accepted.id(), accepted));
+        return true;
+    }
+
     void startInternal() {
         if (channel != null) {
             throw new IllegalStateException("Pulsar server is already started");
@@ -96,7 +122,15 @@ public final class PulsarServer implements InternalEndpoint, AutoCloseable {
             channel = new ServerBootstrap()
                     .group(bossGroup, workerGroup)
                     .channel(NioServerSocketChannel.class)
-                    .childHandler(new PulsarChannelInitializer(this))
+                    .childHandler(new ChannelInitializer<Channel>() {
+                        @Override
+                        protected void initChannel(Channel accepted) {
+                            if (track(accepted)) {
+                                accepted.pipeline().addLast(new PulsarChannelInitializer(PulsarServer.this,
+                                        applicationProtocols, maxProtocolProbeBytes, protocolDetectionTimeoutMillis));
+                            }
+                        }
+                    })
                     .childOption(ChannelOption.TCP_NODELAY, true)
                     .childOption(ChannelOption.SO_KEEPALIVE, true)
                     .bind(new InetSocketAddress(host, port))
@@ -144,6 +178,11 @@ public final class PulsarServer implements InternalEndpoint, AutoCloseable {
 
     public Collection<Connection> connections() {
         return List.copyOf(connections.values());
+    }
+
+    /** All accepted TCP sockets, including custom protocols and pending detection. */
+    public int activeConnections() {
+        return sockets.size();
     }
 
     public void broadcast(Packet packet) {
@@ -239,7 +278,7 @@ public final class PulsarServer implements InternalEndpoint, AutoCloseable {
         Channel current = channel;
         channel = null;
         if (current != null) current.close();
-        connections.values().forEach(NettyConnection::close);
+        sockets.values().forEach(Channel::close);
         connections.clear();
         cacheSubscribers.clear();
         caches.close();
